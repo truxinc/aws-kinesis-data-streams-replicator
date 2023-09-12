@@ -4,6 +4,5 @@
 /.aws-sam/
 /KinesisReplicatorFunction/target/
 .DS_Store
-*.toml
 /.idea/
 /README.pdf

@@ -18,23 +18,14 @@ Parameters:
   InputStreamName:
     Type: String
     Description: Input Kinesis Stream
-  SourceKMSKeyId:
-    Type: String
-    Description: Source Region KMS KeyId. Refer https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-kinesis-stream-streamencryption.html
-    Default: alias/aws/kinesis
-  CheckpointTableName:
-    Type: String
-    Description: Enter the DDB Checkpoint Table Name
-    Default: kdsReplicationCheckpoint
-  ActiveRegionConfigTableName:
-    Type: String
-    Description: Enter the DDB Active Region Config Table Name
-    Default: kdsActiveRegionConfig
   TargetStreamReplicationRegion:
     Type: String
     Description: Enter the KDS Stream Target replication region
+  SNSTopic:
+    Type: String
+    Default: KDSTestTopic
+    Description: Enter SNS Topic to send failed records notification
 
-# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
 Globals:
   Function:
     Timeout: 20
@@ -56,22 +47,6 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaKinesisExecutionRole
       Policies:
-        - PolicyName: DDBAccess
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - dynamodb:BatchGetItem
-                  - dynamodb:BatchWriteItem
-                  - dynamodb:PutItem
-                  - dynamodb:GetItem
-                  - dynamodb:Scan
-                  - dynamodb:Query
-                  - dynamodb:UpdateItem
-                Resource:
-                  - !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/${CheckpointTableName}'
-                  - !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/${ActiveRegionConfigTableName}'
         - PolicyName: KDSWrites
           PolicyDocument:
             Version: "2012-10-17"
@@ -89,9 +64,18 @@ Resources:
                 Action:
                   - cloudwatch:PutMetricData
                 Resource: "*"
+        - PolicyName: SNSPublishMessage
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: "*"
   KinesisReplicatorFunction:
-    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub '${InputStreamName}-replication-lambda-function'
       CodeUri: KinesisReplicatorFunction
       Handler: consumer.Handler::handleRequest
       PackageType: Zip
@@ -99,11 +83,10 @@ Resources:
       Runtime: java11
       MemorySize: 512
       Timeout: 900
-      Environment: # More info about Env Vars: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#environment-object
+      Environment:
         Variables:
-          DDB_CHECKPOINT_TABLE_NAME: !Ref CheckpointTableName
-          DDB_ACTIVE_REGION_CONFIG_TABLE_NAME: !Ref ActiveRegionConfigTableName
           TARGET_STREAM_REPLICATION_REGION: !Ref TargetStreamReplicationRegion
+          SNS_Topic_ARN: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopic}'
   KinesislambdaEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
     Properties:
@@ -115,27 +98,16 @@ Resources:
       FunctionResponseTypes:
         - ReportBatchItemFailures
       StartingPosition: LATEST
-  KinesisStream:
-    Type: AWS::Kinesis::Stream
-    Properties:
-      Name: !Ref InputStreamName
-      ShardCount: 1
-      StreamEncryption:
-        EncryptionType: KMS
-        KeyId: !Ref SourceKMSKeyId
   KinesisStreamConsumer:
     Type: AWS::Kinesis::StreamConsumer
     Properties:
-      StreamARN: !GetAtt KinesisStream.Arn
-      ConsumerName: !Sub "${AWS::StackName}"
+      StreamARN: !Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/${InputStreamName}'
+      ConsumerName: !Sub '${InputStreamName}_replicator'
 
 Outputs:
   FunctionName:
     Description: "Function name"
     Value: !Ref KinesisReplicatorFunction
-  StreamARN:
-    Description: "Stream ARN"
-    Value: !GetAtt KinesisStream.Arn
   ConsumerARN:
     Description: "Stream consumer ARN"
     Value: !GetAtt KinesisStreamConsumer.ConsumerARN

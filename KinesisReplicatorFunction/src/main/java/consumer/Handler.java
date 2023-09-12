@@ -4,8 +4,6 @@ import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.amazonaws.services.lambda.runtime.events.KinesisEvent;
 import com.amazonaws.services.lambda.runtime.events.StreamsEventResponse;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.core.SdkBytes;
@@ -15,10 +13,10 @@ import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.cloudwatch.model.Dimension;
 import software.amazon.awssdk.services.cloudwatch.model.MetricDatum;
 import software.amazon.awssdk.services.cloudwatch.model.PutMetricDataRequest;
-import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
-import software.amazon.awssdk.services.dynamodb.model.*;
 import software.amazon.awssdk.services.kinesis.KinesisClient;
 import software.amazon.awssdk.services.kinesis.model.PutRecordRequest;
+import software.amazon.awssdk.services.sns.SnsClient;
+import software.amazon.awssdk.services.sns.model.PublishRequest;
 
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.StandardCharsets;
@@ -29,30 +27,29 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static java.util.Arrays.asList;
-import static software.amazon.awssdk.services.dynamodb.model.ComparisonOperator.EQ;
 
 public class Handler implements RequestHandler<KinesisEvent, StreamsEventResponse> {
 
     private static final Logger logger = LoggerFactory.getLogger(Handler.class);
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
-
     private static final CharsetDecoder utf8Decoder = StandardCharsets.UTF_8.newDecoder();
 
     private KinesisClient kinesisForwarder = null;
-    private DynamoDbClient ddbClient = null;
     private CloudWatchClient cw = null;
+    private SnsClient sns = null;
+    String currentRegion = System.getenv("AWS_REGION");
 
     public Handler() {
-
         kinesisForwarder = KinesisClient.builder()
                 .region(Region.of(System.getenv("TARGET_STREAM_REPLICATION_REGION")))
                 .httpClient(ApacheHttpClient.create())
                 .build();
-        ddbClient = DynamoDbClient.create();
         cw = CloudWatchClient.builder()
                 .region(Region.of(System.getenv("TARGET_STREAM_REPLICATION_REGION")))
                 .httpClient(ApacheHttpClient.create())
+                .build();
+        sns = SnsClient.builder()
+                .region(Region.of(currentRegion))
                 .build();
     }
 
@@ -61,12 +58,9 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
         Instant start = Instant.now();
         List<StreamsEventResponse.BatchItemFailure> failures = new ArrayList<>();
         String streamName = getStreamName(kinesisEvent.getRecords().get(0));
-        String currentRegion = System.getenv("AWS_REGION");
-        if (isStreamActiveInCurrentRegion(streamName, currentRegion)) {
             int batchSize = kinesisEvent.getRecords().size();
             AtomicInteger successful = new AtomicInteger();
             AtomicReference<String> currentSequenceNumber = new AtomicReference<>("");
-            String lastReplicatedTimestamp = null;
             Instant lastApproximateArrivalInstant = null;
             try {
                 for (KinesisEvent.KinesisEventRecord record : kinesisEvent.getRecords()) {
@@ -75,15 +69,12 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
                     logger.info("Actual Record SequenceNumber: {}, Data: {}", currentSequenceNumber, actualDataString);
 
                     // Forward to other region
-
                     PutRecordRequest putRecordRequest = PutRecordRequest.builder()
                             .streamName(streamName)
                             .partitionKey(record.getKinesis().getPartitionKey())
                             .data(SdkBytes.fromString(actualDataString, StandardCharsets.UTF_8))
                             .build();
                     kinesisForwarder.putRecord(putRecordRequest);
-                    ddbClient.putItem(buildItem(streamName, actualDataString));
-                    lastReplicatedTimestamp = objectMapper.readTree(actualDataString).at("/commitTimestamp").asText();
                     lastApproximateArrivalInstant = record.getKinesis().getApproximateArrivalTimestamp().toInstant();
                     successful.getAndIncrement();
                 }
@@ -120,50 +111,24 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
             } catch (Throwable e) {
                 logger.error("Error while publishing metric to cloudwatch");
             }
-        } else {
-            logger.info("Stream {} is not active in the current region", streamName);
-        }
-        return StreamsEventResponse.builder().withBatchItemFailures(failures).build();
-    }
-
-    private PutItemRequest buildItem(String streamName, String actualDataString) throws JsonProcessingException {
-        Map<String, AttributeValue> item = new HashMap<>();
-        item.put("streamName", AttributeValue.builder().s(streamName).build());
-        item.put("lastReplicatedCommitTimestamp", AttributeValue.builder().s(objectMapper.readTree(actualDataString).at("/commitTimestamp").asText()).build());
-        return PutItemRequest.builder()
-                .tableName(System.getenv("DDB_CHECKPOINT_TABLE_NAME"))
-                .item(item)
-                .build();
-    }
-
-    private boolean isStreamActiveInCurrentRegion(String streamName, String currentRegion) {
-        try {
-
-            Map<String, Condition> keyConditions = Collections.singletonMap("streamName", Condition.builder()
-                    .comparisonOperator(EQ)
-                    .attributeValueList(AttributeValue.builder().s(streamName).build())
-                    .build());
-            QueryResponse queryResponse = ddbClient.query(QueryRequest.builder()
-                    .tableName(System.getenv("DDB_ACTIVE_REGION_CONFIG_TABLE_NAME"))
-                    .keyConditions(keyConditions)
-                    .attributesToGet("activeRegion")
-                    .build());
-
-            if (!queryResponse.hasItems()) {
-                logger.warn("Stream is not configured for cross region replication");
-                return false;
-            } else {
-                if (queryResponse.count() > 1) {
-                    logger.error("A stream cannot be active in more than one region");
-                    return false;
+            if (!failures.isEmpty()) {
+                // Construct the message to send to SNS
+                StringBuilder message = new StringBuilder("Batch processing failures:\n");
+                for (StreamsEventResponse.BatchItemFailure failure : failures) {
+                    message.append("Item: ")
+                        .append(failure.getItemIdentifier())
+                        .append("\n");
                 }
-                AttributeValue activeRegionAttributeValue = queryResponse.items().get(0).get("activeRegion");
-                return currentRegion.equalsIgnoreCase(activeRegionAttributeValue.s());
+                // Publish message to SNS topic
+                String topicArn = System.getenv("SNS_Topic_ARN");
+                PublishRequest publishRequest = PublishRequest.builder()
+                        .topicArn(topicArn)
+                        .message(message.toString())
+                        .subject("Kinesis Replication Batch Processing Failures")
+                        .build();
+                sns.publish(publishRequest);
             }
-        } catch (Exception e) {
-            logger.error("Error while attempting to fetch current stream's active region");
-        }
-        return false;
+        return StreamsEventResponse.builder().withBatchItemFailures(failures).build();
     }
 
     private String getStreamName(KinesisEvent.KinesisEventRecord record) {
