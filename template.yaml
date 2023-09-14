@@ -23,7 +23,7 @@ Parameters:
     Description: Enter the KDS Stream Target replication region
   SNSTopic:
     Type: String
-    Default: KDSTestTopic
+    Default: SNS Topic Name
     Description: Enter SNS Topic to send failed records notification
 
 Globals:
