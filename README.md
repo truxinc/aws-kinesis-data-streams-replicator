@@ -162,3 +162,9 @@ See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more inform
 ## License
 
 This library is licensed under the MIT-0 License. See the LICENSE file.
+
+
+## To setup replication on specific environment use following commands (Trux setup):
+* build the project `sam build`
+* deploy the project `sam deploy --config-file samconfig.toml --config-env environment_name --guided`
+* delete the project `sam delete --region region_name`

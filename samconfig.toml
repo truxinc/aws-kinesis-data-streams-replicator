@@ -51,3 +51,29 @@ capabilities = "CAPABILITY_IAM"
 parameter_overrides = "InputStreamName=\"prod_locationradius_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitorCriticalIssues\""
 image_repositories = []
 disable_rollback = false
+
+[uat2_assignmentevent_stream]
+[uat2_assignmentevent_stream.deploy]
+[uat2_assignmentevent_stream.deploy.parameters]
+stack_name = "uat2AssignmenteventKinesisStack"
+resolve_s3 = true
+s3_prefix = "uat2AssignmenteventKinesisStack"
+region = "us-west-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "InputStreamName=\"uat2_assignmentevent_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitor-issues\""
+image_repositories = []
+disable_rollback = false
+
+[uat2_locationradius_stream]
+[uat2_locationradius_stream.deploy]
+[uat2_locationradius_stream.deploy.parameters]
+stack_name = "uat2locationradiusKinesisStack"
+resolve_s3 = true
+s3_prefix = "uat2locationradiusKinesisStack"
+region = "us-west-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "InputStreamName=\"uat2_locationradius_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitor-issues\""
+image_repositories = []
+disable_rollback = false
