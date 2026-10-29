@@ -1,159 +1,79 @@
-# A Continuous Data Capture(CDC) pipeline to AWS Kinesis Data Streams with Cross Region Replication & Checkpointing for Disaster Recovery
+# Kinesis Data Streams cross-region replicator
 
-## Usecase:
+Copies every record from a Kinesis data stream in its home region to a stream with the same name in a
+DR region (us-west-2 for all Trux environments). There is one SAM stack per source stream.
 
-1. There is a need to replicate data in a CDC manner to AWS environment from a remote data source (on-prem).
-2. The goal is to enable consumers to operate out of any AWS region in the same AWS Account of choice, under the assumption that data is going to be available and accesible in the Kinesis Data Streams (KDS) in the region.
-3. The primary goal is to ensure data is available and accessible in KDS in both the regions (consider two regions for this usecase), without any data loss.
-4. Also, if there is a regional disaster, there is a need to know how much of data is available in any region within KDS. This is from an observability standpoint to tell the consumers of KDS as to how much of data is available.
-5. Assume that the data from the remote data source comes with a Commit Timestamp of the transaction that is being replicated.
+Originally forked from the AWS sample `aws-samples/aws-kinesis-data-streams-replicator`; the
+DynamoDB checkpoint and active-region tables from that sample are not used.
 
-    ```json
-    {    
-       "key": 3174940031,    
-       "commitTimestamp": "2021-11-10T00:48:30Z"
-    }
-    ```
+## How it works
 
-The Single Region Architecture looks this way
+Each stack (`template.yaml`) creates:
 
-![Single Region CDC Architecture](img/Single_Region_CDC.png)
+- an Enhanced Fan-Out consumer `<stream>_replicator` on the source stream, so replication gets its own
+  2 MB/s per shard and does not compete with application consumers;
+- the Lambda `<stream>-replication-lambda-function` (Java 25), attached to that consumer through an event
+  source mapping (`StartingPosition: LATEST`, `ReportBatchItemFailures`, retries until the record expires);
+- an IAM role allowing `kinesis:PutRecords` on the same-named stream in any region, CloudWatch metrics,
+  and SNS publish;
+- a CloudWatch alarm `<stream>-replication-lag` on the function's `IteratorAge` (over 1 hour for 15
+  minutes), notifying `SNSTopic`.
 
-## Solution:
+For each invocation the handler (`KinesisReplicatorFunction/src/main/java/consumer/Handler.java`):
 
-### Prerequisites:
+1. splits the batch, in order, into `PutRecords` calls of at most 500 records / 5 MB;
+2. writes each call to the target region, passing the payload bytes and partition key through unchanged;
+3. retries only the entries a call rejected (usually `ProvisionedThroughputExceededException`), up to three
+   attempts with a short backoff;
+4. if entries still fail, returns the first failed record's sequence number as the batch item failure, so
+   Lambda resumes from that record, and publishes a notification to `SNSTopic`;
+5. publishes `ThroughPut` and `ReplicationLagSeconds` to the `KinesisCrossRegionReplication` namespace in
+   the target region, and logs one summary line per batch.
 
-To deploy this application you will need AWS SAM and AWS CLI installed on your machine.
+Delivery is at least once. A retried batch can re-send records that were already written, and
+records that a producer aggregated with the KPL share one sequence number, so they are retried together.
+Writes are not strictly ordered: a retried entry lands after entries that succeeded on the first attempt.
 
-### Summary:
+The target stream must exist before the stack is deployed. Prod's Oregon streams are created by the
+`prodOregon` branch of `truxinc/cdk` (`prodOregonKinesisStackCDK`).
 
-The solution is to replicate the CDC data from the remote data source to 1 AWS region, and then setup cross region custom replication between the KDS in both the regions.
+## Configuration
 
-This custom replication mechanism 
-* would take care of checkpointing to a DynamoDB table. This table woulod primarily use the Commit Timestamp for checkpointing, which would accurately indicate the how much data has been replicated.
-* uses Lambda Checkpointing to accuratelt resume from record failures within a batch
-* uses a config DynamoDB table to know which region is active for a KDS stream
+`samconfig.toml` has one config env per source stream. Each sets the stack name, the source region, and
+these parameters:
 
-The hope is to have a failover automation process that takes care of failover activities when needed, and it makes use of the replication checkpoint to resume producing/replicatin data into KDS.
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `InputStreamName` | — | Source stream; the target stream has the same name |
+| `TargetStreamReplicationRegion` | — | DR region (`us-west-2`) |
+| `SNSTopic` | — | Topic name in the source region for failure and lag notifications |
+| `FunctionMemorySize` | 512 | Lambda memory in MB |
+| `EventSourceBatchSize` | 8000 | Maximum records per invocation |
 
-The Multi Region CDC Architecture solution is as shown below
+## Build and deploy
 
-![Multi-Region CDC Architecture](img/Multi-Region_CDC.png)
-
-### Cross Region Replicator Lambda:
-
-The Cross Region Replicator is a Lambda function using the Enhanced Fan-Out pattern, that performs the following steps:
-
-* For every batch of Kinesis records, the lambda function checks with the DynamoDB Table `kdsActiveRegionConfig` if the current stream name is active in the current AWS region where the function is invoked.
-
-    The active region configuration within the table is expected to be as shown below:
-    
-    ```json
-    {
-	    "stream-name": "example-stream-1",
-	    "active-region" : "us-east-1"
-    }
-    ```
-  
-  if the current region of the Lambda function does not match the active region for the stream, the function would just return without any activites.
-  
-* If the current AWS region is where the stream is active per configuration, then the function iterates over every record in the batch and does the following for each record:
-    
-    - Constructs a Kinesis PUT record request and sends it to the KDS in the other region
-    - Updates the commit timestamp from the Kinesis record to the DynamoDB Table `kdsReplicationCheckpoint` to reflect accurately what was the last commit timestamp CDC data that was replicated.
-        
-    ```json
-    {
-    	"stream-name": "example-stream-1",
-    	"last-timestamp-replicated" : "2021-11-10T00:48:30Z"
-    }
-    ```
-    
-    * If there is a failure, the sequence number of the record is tracked and the iteration is broken.
-  
-* The function returns the list of failed sequence numbers. If there are no failures, an empty list is returned which indicates the batch was successful.
-  By returning the failed sequence number, the feature of [Lambda Checkpointing](https://aws.amazon.com/about-aws/whats-new/2020/12/aws-lambda-launches-checkpointing-for-amazon-kinesis-and-amazon-dynamodb-streams/) is used.
-
-### Project Structure:
-
-This project contains source code and supporting files for a serverless application that you can deploy with the SAM CLI. It includes the following files and folders.
-
-* KinesisReplicatorFunction/src/main - Code for the application's Lambda function that replicates data between Kinesis Data Streams in two regions and checkpoints
-* template.yaml - A template that defines the application's AWS resources.
-* ddb-template.yml - A template to provision the DynamoDB Global Table resources that are needed.
-
-## Deploy the sample application
-
-### Step 1: Deploy the DynamoDB resources
-
-* Create the tables in either us-east-1 or us-east-2. Since the tables are Global Tables, it is sufficient to run the stack in a single region.
-
-```shell script
-aws cloudformation create-stack --stack-name kdsReplicationDDBStack --template-body file://ddb-template.yml
-```
-
-* Populate the Active Region Config table
-
-```shell script
-aws dynamodb put-item --table-name kdsActiveRegionConfig --item '{"streamName": {"S": "kds-stream-1"}, "activeRegion": {"S": "us-east-1"}}'
-```
-
-### Step 2: Deploy the Application
-
-* Use AWS SAM to deploy your application in both regions us-east-1 and us-east-2.
+Needs JDK 25, Maven, and the SAM CLI. Deploying needs a profile that can create IAM roles and
+CloudFormation stacks in the target account.
 
 ```shell script
 sam build
-
-export AWS_REGION="us-east-1"
-sam deploy --guided
-
-export AWS_REGION="us-east-2"
-sam deploy --guided
+sam deploy --config-env <stream_name>
 ```
 
-### Step 3: Generate data for Kinesis Data Streams
+`confirm_changeset = true` is set for every env, so review the change set before confirming it. Redeploying
+an existing stack updates the function in place and keeps the event source mapping, so its checkpoint is kept.
 
-* After the deployment is successful, it is necessary to populate the data in Kinesis Data Streams in us-east-1. use the [Kinesis Data Generator](https://awslabs.github.io/amazon-kinesis-data-generator/) to generate test data.
-* The template of the test data payload can be as follows:
+Run the unit tests with `mvn test` in `KinesisReplicatorFunction/`.
 
-```json
-{
-    "key": {{random.number(10000000000)}},
-    "commitTimestamp": "{{date.utc}}"
-}
-```
+## Checking that replication is complete
 
-![Kinesis Data Generator Snapshot](img/Kinesis_Data_Generator.png)
+Compare the daily `AWS/Kinesis` `IncomingBytes` of the source stream with the same-named stream in the
+target region; they should match within a percent or two. `IncomingRecords` does not match even when
+replication is complete: producers that aggregate with the KPL send one Kinesis record for many user
+records, and the Lambda receives and writes those user records individually.
 
-### Step 4: Validation
-
-* Validate the Commit Timestamp written to the DynamoDB
-* Validate the Lambda Logs in the active region, which should look like the sample below
-
-```text
-...
-2021-10-12T14:25:06.536-05:00	2021-10-12 19:25:06 bce81bb9-344f-4545-8992-9329f2e58724 INFO Handler - Actual Record Data: { "key": 9505969289, "commitTimestamp": "2021-10-12T19:25:02Z"}
-2021-10-12T14:25:06.543-05:00	2021-10-12 19:25:06 bce81bb9-344f-4545-8992-9329f2e58724 INFO Handler - Total Batch Size: 100, Successfully Processed: 100
-```
-
-* Validate the Lambda logs in the inactive region, which should look like the sample below
-
-```text
-2021-10-13 16:19:44 28b3bffe-133f-49a6-9626-dd8509797283 INFO  Handler - Stream kds-stream-1 is not active in the current region
-```
-
-### Step 5: Cleanup
-
-Delete the stacks in both regions by using the following commands
-
-```shell script
-aws cloudformation delete-stack --stack-name kdsReplicationDDBStack
-
-sam delete --region us-east-1
-
-sam delete --region us-east-2
-```
+`IteratorAge` on the function is the replication lag. If it reaches the source stream's retention period,
+records expire before they are replicated.
 
 ## Security
 
@@ -162,9 +82,3 @@ See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more inform
 ## License
 
 This library is licensed under the MIT-0 License. See the LICENSE file.
-
-
-## To setup replication on specific environment use following commands (Trux setup):
-* build the project `sam build`
-* deploy the project `sam deploy --config-file samconfig.toml --config-env environment_name --guided`
-* delete the project `sam delete --region region_name`
