@@ -53,7 +53,7 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - kinesis:PutRecord
+                  - kinesis:PutRecords
                 Resource:
                   - !Sub 'arn:aws:kinesis:*:${AWS::AccountId}:stream/${InputStreamName}'
         - PolicyName: CloudWatchMetrics

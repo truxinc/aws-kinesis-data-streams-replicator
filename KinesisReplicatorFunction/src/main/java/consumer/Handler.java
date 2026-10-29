@@ -7,6 +7,7 @@ import com.amazonaws.services.lambda.runtime.events.StreamsEventResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
@@ -14,121 +15,181 @@ import software.amazon.awssdk.services.cloudwatch.model.Dimension;
 import software.amazon.awssdk.services.cloudwatch.model.MetricDatum;
 import software.amazon.awssdk.services.cloudwatch.model.PutMetricDataRequest;
 import software.amazon.awssdk.services.kinesis.KinesisClient;
-import software.amazon.awssdk.services.kinesis.model.PutRecordRequest;
+import software.amazon.awssdk.services.kinesis.model.PutRecordsRequest;
+import software.amazon.awssdk.services.kinesis.model.PutRecordsRequestEntry;
+import software.amazon.awssdk.services.kinesis.model.PutRecordsResultEntry;
 import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.sns.model.PublishRequest;
 
-import java.nio.charset.CharsetDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-
-import static java.util.Arrays.asList;
+import java.util.ArrayList;
+import java.util.List;
 
 public class Handler implements RequestHandler<KinesisEvent, StreamsEventResponse> {
 
     private static final Logger logger = LoggerFactory.getLogger(Handler.class);
 
-    private static final CharsetDecoder utf8Decoder = StandardCharsets.UTF_8.newDecoder();
+    static final int MAX_RECORDS_PER_PUT = 500;
+    private static final int MAX_BYTES_PER_PUT = 5 * 1024 * 1024;
+    private static final int MAX_PUT_ATTEMPTS = 3;
+    private static final long RETRY_BACKOFF_MILLIS = 100;
 
-    private KinesisClient kinesisForwarder = null;
-    private CloudWatchClient cw = null;
-    private SnsClient sns = null;
-    String currentRegion = System.getenv("AWS_REGION");
+    private final KinesisClient kinesisForwarder;
+    private final CloudWatchClient cw;
+    private final SnsClient sns;
+    private final String snsTopicArn;
 
     public Handler() {
-        kinesisForwarder = KinesisClient.builder()
-                .region(Region.of(System.getenv("TARGET_STREAM_REPLICATION_REGION")))
-                .httpClient(ApacheHttpClient.create())
-                .build();
-        cw = CloudWatchClient.builder()
-                .region(Region.of(System.getenv("TARGET_STREAM_REPLICATION_REGION")))
-                .httpClient(ApacheHttpClient.create())
-                .build();
-        sns = SnsClient.builder()
-                .region(Region.of(currentRegion))
-                .build();
+        this(KinesisClient.builder()
+                        .region(Region.of(System.getenv("TARGET_STREAM_REPLICATION_REGION")))
+                        .httpClient(ApacheHttpClient.create())
+                        .build(),
+                CloudWatchClient.builder()
+                        .region(Region.of(System.getenv("TARGET_STREAM_REPLICATION_REGION")))
+                        .httpClient(ApacheHttpClient.create())
+                        .build(),
+                SnsClient.builder()
+                        .region(Region.of(System.getenv("AWS_REGION")))
+                        .build(),
+                System.getenv("SNS_Topic_ARN"));
+    }
+
+    Handler(KinesisClient kinesisForwarder, CloudWatchClient cw, SnsClient sns, String snsTopicArn) {
+        this.kinesisForwarder = kinesisForwarder;
+        this.cw = cw;
+        this.sns = sns;
+        this.snsTopicArn = snsTopicArn;
     }
 
     @Override
     public StreamsEventResponse handleRequest(KinesisEvent kinesisEvent, Context context) {
         Instant start = Instant.now();
-        List<StreamsEventResponse.BatchItemFailure> failures = new ArrayList<>();
-        String streamName = getStreamName(kinesisEvent.getRecords().get(0));
-            int batchSize = kinesisEvent.getRecords().size();
-            AtomicInteger successful = new AtomicInteger();
-            AtomicReference<String> currentSequenceNumber = new AtomicReference<>("");
-            Instant lastApproximateArrivalInstant = null;
-            try {
-                for (KinesisEvent.KinesisEventRecord record : kinesisEvent.getRecords()) {
-                    currentSequenceNumber.getAndSet(record.getKinesis().getSequenceNumber());
-                    String actualDataString = utf8Decoder.decode(record.getKinesis().getData()).toString();
-                    logger.info("Actual Record SequenceNumber: {}, Data: {}", currentSequenceNumber, actualDataString);
+        List<KinesisEvent.KinesisEventRecord> records = kinesisEvent.getRecords();
+        String streamName = getStreamName(records.get(0));
 
-                    // Forward to other region
-                    PutRecordRequest putRecordRequest = PutRecordRequest.builder()
-                            .streamName(streamName)
-                            .partitionKey(record.getKinesis().getPartitionKey())
-                            .data(SdkBytes.fromString(actualDataString, StandardCharsets.UTF_8))
-                            .build();
-                    kinesisForwarder.putRecord(putRecordRequest);
-                    lastApproximateArrivalInstant = record.getKinesis().getApproximateArrivalTimestamp().toInstant();
-                    successful.getAndIncrement();
-                }
-            } catch (Exception e) {
-                failures.add(StreamsEventResponse.BatchItemFailure.builder().withItemIdentifier(currentSequenceNumber.get()).build());
-                logger.error("Error while processing batch", e);
+        int successful = 0;
+        String failedSequenceNumber = null;
+        for (List<KinesisEvent.KinesisEventRecord> chunk : chunk(records)) {
+            int sent = putChunkReturningSentCount(streamName, chunk);
+            successful += sent;
+            if (sent < chunk.size()) {
+                failedSequenceNumber = chunk.get(sent).getKinesis().getSequenceNumber();
+                break;
             }
-            Instant end = Instant.now();
-            int successfullyProcessed = successful.get();
-            long timeTakenSeconds = Duration.between(start, end).toSeconds();
-            long replicationLag = Duration.between(lastApproximateArrivalInstant, end).toSeconds();
-            logger.info("TotalBatchSize {} Successful {} TimeTakenSeconds {} ReplicationLag {}", batchSize, successfullyProcessed, timeTakenSeconds, replicationLag);
-            try {
-                MetricDatum throughputMetricData = MetricDatum.builder()
-                        .metricName("ThroughPut")
-                        .dimensions(Dimension.builder()
-                                .name("StreamName")
-                                .value(streamName)
-                                .build())
-                        .value((double) successfullyProcessed)
-                        .build();
-                MetricDatum replicationLatencyMetricData = MetricDatum.builder()
-                        .metricName("ReplicationLagSeconds")
-                        .dimensions(Dimension.builder()
-                                .name("StreamName")
-                                .value(streamName)
-                                .build())
-                        .value((double) replicationLag)
-                        .build();
-                cw.putMetricData(PutMetricDataRequest.builder()
-                        .namespace("KinesisCrossRegionReplication")
-                        .metricData(asList(throughputMetricData, replicationLatencyMetricData))
-                        .build());
-            } catch (Throwable e) {
-                logger.error("Error while publishing metric to cloudwatch");
-            }
-            if (!failures.isEmpty()) {
-                // Construct the message to send to SNS
-                StringBuilder message = new StringBuilder("Batch processing failures:\n");
-                for (StreamsEventResponse.BatchItemFailure failure : failures) {
-                    message.append("Item: ")
-                        .append(failure.getItemIdentifier())
-                        .append("\n");
-                }
-                // Publish message to SNS topic
-                String topicArn = System.getenv("SNS_Topic_ARN");
-                PublishRequest publishRequest = PublishRequest.builder()
-                        .topicArn(topicArn)
-                        .message(message.toString())
-                        .subject("Kinesis Replication Batch Processing Failures")
-                        .build();
-                sns.publish(publishRequest);
-            }
+        }
+
+        Instant end = Instant.now();
+        Instant lastArrival = records.get(Math.max(successful - 1, 0)).getKinesis().getApproximateArrivalTimestamp().toInstant();
+        long replicationLag = Duration.between(lastArrival, end).toSeconds();
+        logger.info("TotalBatchSize {} Successful {} TimeTakenSeconds {} ReplicationLag {}",
+                records.size(), successful, Duration.between(start, end).toSeconds(), replicationLag);
+        publishMetrics(streamName, successful, replicationLag);
+
+        if (failedSequenceNumber == null) {
+            return StreamsEventResponse.builder().withBatchItemFailures(new ArrayList<>()).build();
+        }
+        notifyFailure(streamName, failedSequenceNumber);
+        List<StreamsEventResponse.BatchItemFailure> failures = new ArrayList<>();
+        failures.add(StreamsEventResponse.BatchItemFailure.builder().withItemIdentifier(failedSequenceNumber).build());
         return StreamsEventResponse.builder().withBatchItemFailures(failures).build();
+    }
+
+    private static List<List<KinesisEvent.KinesisEventRecord>> chunk(List<KinesisEvent.KinesisEventRecord> records) {
+        List<List<KinesisEvent.KinesisEventRecord>> chunks = new ArrayList<>();
+        List<KinesisEvent.KinesisEventRecord> current = new ArrayList<>();
+        long currentBytes = 0;
+        for (KinesisEvent.KinesisEventRecord record : records) {
+            long size = record.getKinesis().getData().remaining()
+                    + record.getKinesis().getPartitionKey().getBytes(StandardCharsets.UTF_8).length;
+            if (!current.isEmpty() && (current.size() == MAX_RECORDS_PER_PUT || currentBytes + size > MAX_BYTES_PER_PUT)) {
+                chunks.add(current);
+                current = new ArrayList<>();
+                currentBytes = 0;
+            }
+            current.add(record);
+            currentBytes += size;
+        }
+        chunks.add(current);
+        return chunks;
+    }
+
+    private int putChunkReturningSentCount(String streamName, List<KinesisEvent.KinesisEventRecord> chunk) {
+        List<PutRecordsRequestEntry> entries = new ArrayList<>(chunk.size());
+        List<Integer> pending = new ArrayList<>(chunk.size());
+        for (int i = 0; i < chunk.size(); i++) {
+            entries.add(PutRecordsRequestEntry.builder()
+                    .partitionKey(chunk.get(i).getKinesis().getPartitionKey())
+                    .data(SdkBytes.fromByteBuffer(chunk.get(i).getKinesis().getData()))
+                    .build());
+            pending.add(i);
+        }
+
+        for (int attempt = 1; ; attempt++) {
+            List<PutRecordsRequestEntry> attemptEntries = new ArrayList<>(pending.size());
+            for (int i : pending) {
+                attemptEntries.add(entries.get(i));
+            }
+            List<PutRecordsResultEntry> results;
+            try {
+                results = kinesisForwarder.putRecords(PutRecordsRequest.builder()
+                        .streamName(streamName)
+                        .records(attemptEntries)
+                        .build()).records();
+            } catch (SdkException e) {
+                logger.error("PutRecords to {} failed", streamName, e);
+                return pending.get(0);
+            }
+
+            List<Integer> stillFailed = new ArrayList<>();
+            PutRecordsResultEntry firstError = null;
+            for (int j = 0; j < results.size(); j++) {
+                if (results.get(j).errorCode() != null) {
+                    stillFailed.add(pending.get(j));
+                    if (firstError == null) {
+                        firstError = results.get(j);
+                    }
+                }
+            }
+            if (stillFailed.isEmpty()) {
+                return chunk.size();
+            }
+            if (attempt == MAX_PUT_ATTEMPTS) {
+                logger.error("{} of {} records to {} still failing after {} attempts: {} {}", stillFailed.size(),
+                        chunk.size(), streamName, attempt, firstError.errorCode(), firstError.errorMessage());
+                return stillFailed.get(0);
+            }
+            pending = stillFailed;
+            try {
+                Thread.sleep(RETRY_BACKOFF_MILLIS * attempt);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return pending.get(0);
+            }
+        }
+    }
+
+    private void publishMetrics(String streamName, int successful, long replicationLag) {
+        Dimension stream = Dimension.builder().name("StreamName").value(streamName).build();
+        try {
+            cw.putMetricData(PutMetricDataRequest.builder()
+                    .namespace("KinesisCrossRegionReplication")
+                    .metricData(
+                            MetricDatum.builder().metricName("ThroughPut").dimensions(stream).value((double) successful).build(),
+                            MetricDatum.builder().metricName("ReplicationLagSeconds").dimensions(stream).value((double) replicationLag).build())
+                    .build());
+        } catch (Throwable e) {
+            logger.error("Error while publishing metric to cloudwatch", e);
+        }
+    }
+
+    private void notifyFailure(String streamName, String failedSequenceNumber) {
+        sns.publish(PublishRequest.builder()
+                .topicArn(snsTopicArn)
+                .subject("Kinesis Replication Batch Processing Failures")
+                .message("Batch processing failures on " + streamName + ":\nItem: " + failedSequenceNumber + "\n")
+                .build());
     }
 
     private String getStreamName(KinesisEvent.KinesisEventRecord record) {
