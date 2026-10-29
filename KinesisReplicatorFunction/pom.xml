@@ -100,37 +100,4 @@
           <scope>test</scope>
         </dependency>
     </dependencies>
-
-    <build>
-      <plugins>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-shade-plugin</artifactId>
-          <version>3.6.2</version>
-          <configuration>
-              <createDependencyReducedPom>false</createDependencyReducedPom>
-          </configuration>
-          <executions>
-            <execution>
-              <phase>package</phase>
-              <goals>
-                <goal>shade</goal>
-              </goals>
-              <configuration>
-                <transformers>
-                  <transformer implementation="org.apache.logging.log4j.maven.plugins.shade.transformer.Log4j2PluginCacheFileTransformer"/>
-                </transformers>
-              </configuration>
-            </execution>
-          </executions>
-          <dependencies>
-            <dependency>
-              <groupId>org.apache.logging.log4j</groupId>
-              <artifactId>log4j-transform-maven-shade-plugin-extensions</artifactId>
-              <version>0.2.0</version>
-            </dependency>
-          </dependencies>
-        </plugin>
-      </plugins>
-    </build>
 </project>
