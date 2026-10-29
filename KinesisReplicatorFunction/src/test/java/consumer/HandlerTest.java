@@ -6,6 +6,8 @@ import com.amazonaws.services.lambda.runtime.events.KinesisEvent.Record;
 import com.amazonaws.services.lambda.runtime.events.StreamsEventResponse;
 import org.junit.Test;
 import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
+import software.amazon.awssdk.services.cloudwatch.model.PutMetricDataRequest;
+import software.amazon.awssdk.services.cloudwatch.model.PutMetricDataResponse;
 import software.amazon.awssdk.services.kinesis.KinesisClient;
 import software.amazon.awssdk.services.kinesis.model.PutRecordsRequest;
 import software.amazon.awssdk.services.kinesis.model.PutRecordsRequestEntry;
@@ -81,6 +83,11 @@ public class HandlerTest {
 
     private static Handler handler(FakeKinesis kinesis, FakeSns sns) {
         return new Handler(kinesis, new CloudWatchClient() {
+            @Override
+            public PutMetricDataResponse putMetricData(PutMetricDataRequest request) {
+                return PutMetricDataResponse.builder().build();
+            }
+
             @Override
             public String serviceName() {
                 return "cloudwatch";
