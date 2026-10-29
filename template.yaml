@@ -80,7 +80,7 @@ Resources:
       Handler: consumer.Handler::handleRequest
       PackageType: Zip
       Role: !GetAtt LambdaRole.Arn
-      Runtime: java11
+      Runtime: java25
       MemorySize: 512
       Timeout: 900
       Environment:

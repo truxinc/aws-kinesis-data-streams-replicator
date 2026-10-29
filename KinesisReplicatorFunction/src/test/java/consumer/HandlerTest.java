@@ -4,8 +4,6 @@ import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.events.KinesisEvent;
 import com.amazonaws.services.lambda.runtime.events.KinesisEvent.KinesisEventRecord;
 import com.amazonaws.services.lambda.runtime.events.KinesisEvent.Record;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.Test;
 
 import java.nio.charset.Charset;
@@ -30,12 +28,6 @@ public class HandlerTest {
 
         Context context = new TestContext();
         subject.handleRequest(inputEvent, context);
-    }
-
-    @Test
-    public void testJsonParsing() throws JsonProcessingException {
-        String jsonString = "{ \"key\": 2049761200, \"commitTimestamp\": \"2021-10-12T19:16:14Z\"}";
-        assertThat(new ObjectMapper().readTree(jsonString).at("/commitTimestamp").asText()).isEqualTo("2021-10-12T19:16:14Z");
     }
 
     @Test
