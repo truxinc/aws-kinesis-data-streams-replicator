@@ -8,7 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.core.exception.SdkException;
-import software.amazon.awssdk.http.apache.ApacheHttpClient;
+import software.amazon.awssdk.http.apache5.Apache5HttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.cloudwatch.model.Dimension;
@@ -44,11 +44,11 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
     public Handler() {
         this(KinesisClient.builder()
                         .region(Region.of(System.getenv("TARGET_STREAM_REPLICATION_REGION")))
-                        .httpClient(ApacheHttpClient.create())
+                        .httpClient(Apache5HttpClient.create())
                         .build(),
                 CloudWatchClient.builder()
                         .region(Region.of(System.getenv("TARGET_STREAM_REPLICATION_REGION")))
-                        .httpClient(ApacheHttpClient.create())
+                        .httpClient(Apache5HttpClient.create())
                         .build(),
                 SnsClient.builder()
                         .region(Region.of(System.getenv("AWS_REGION")))
