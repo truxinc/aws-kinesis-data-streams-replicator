@@ -31,7 +31,7 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
 
     private static final Logger logger = LoggerFactory.getLogger(Handler.class);
 
-    static final int MAX_RECORDS_PER_PUT = 500;
+    private static final int MAX_RECORDS_PER_PUT = 500;
     private static final int MAX_BYTES_PER_PUT = 5 * 1024 * 1024;
     private static final int MAX_PUT_ATTEMPTS = 3;
     private static final long RETRY_BACKOFF_MILLIS = 100;
