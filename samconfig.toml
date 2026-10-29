@@ -6,10 +6,10 @@ version = 0.1
 stack_name = "qaAssignmenteventKinesisStack"
 resolve_s3 = true
 s3_prefix = "qaAssignmenteventKinesisStack"
-region = "us-east-1"
+region = "us-east-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "InputStreamName=\"qa_assignmentevent_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitor-issues\""
+parameter_overrides = "InputStreamName=\"qa_assignmentevent_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitor-issues-qa-test\""
 image_repositories = []
 disable_rollback = false
 
@@ -19,10 +19,10 @@ disable_rollback = false
 stack_name = "qalocationradiusKinesisStack"
 resolve_s3 = true
 s3_prefix = "qalocationradiusKinesisStack"
-region = "us-east-1"
+region = "us-east-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "InputStreamName=\"qa_locationradius_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitor-issues\""
+parameter_overrides = "InputStreamName=\"qa_locationradius_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitor-issues-qa-test\""
 image_repositories = []
 disable_rollback = false
 
