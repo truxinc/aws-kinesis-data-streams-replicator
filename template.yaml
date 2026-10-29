@@ -104,6 +104,27 @@ Resources:
       StreamARN: !Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/${InputStreamName}'
       ConsumerName: !Sub '${InputStreamName}_replicator'
 
+  ReplicationLagAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${InputStreamName}-replication-lag'
+      AlarmDescription: !Sub 'Replication of ${InputStreamName} to ${TargetStreamReplicationRegion} is over an hour behind; records expire unreplicated once lag reaches the stream retention.'
+      Namespace: AWS/Lambda
+      MetricName: IteratorAge
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref KinesisReplicatorFunction
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 3600000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopic}'
+      OKActions:
+        - !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopic}'
+
 Outputs:
   FunctionName:
     Description: "Function name"
