@@ -48,7 +48,7 @@ s3_prefix = "prodlocationradiusKinesisStack"
 region = "us-east-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "InputStreamName=\"prod_locationradius_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitorCriticalIssues\""
+parameter_overrides = "InputStreamName=\"prod_locationradius_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitorCriticalIssues\" FunctionMemorySize=\"1024\" EventSourceBatchSize=\"10000\""
 image_repositories = []
 disable_rollback = false
 
