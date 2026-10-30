@@ -185,11 +185,15 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
     }
 
     private void notifyFailure(String streamName, String failedSequenceNumber) {
-        sns.publish(PublishRequest.builder()
-                .topicArn(snsTopicArn)
-                .subject("Kinesis Replication Batch Processing Failures")
-                .message("Batch processing failures on " + streamName + ":\nItem: " + failedSequenceNumber + "\n")
-                .build());
+        try {
+            sns.publish(PublishRequest.builder()
+                    .topicArn(snsTopicArn)
+                    .subject("Kinesis Replication Batch Processing Failures")
+                    .message("Batch processing failures on " + streamName + ":\nItem: " + failedSequenceNumber + "\n")
+                    .build());
+        } catch (SdkException e) {
+            logger.error("Error while publishing failure notification for {}", streamName, e);
+        }
     }
 
     private String getStreamName(KinesisEvent.KinesisEventRecord record) {
