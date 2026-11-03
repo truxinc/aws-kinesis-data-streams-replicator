@@ -30,10 +30,11 @@ public class HandlerTest {
 
     private static final String SOURCE_ARN =
             "arn:aws:kinesis:us-east-2:111111111111:stream/test_stream/consumer/test_stream_replicator:1";
+    private static final String THROTTLED = "ProvisionedThroughputExceededException";
 
     @Test
     public void sendsRecordsInChunksOfAtMost500() {
-        FakeKinesis kinesis = new FakeKinesis(Set.of(), Set.of());
+        FakeKinesis kinesis = new FakeKinesis(Set.of(), Set.of(), THROTTLED);
         FakeSns sns = new FakeSns();
 
         StreamsEventResponse response = handler(kinesis, sns).handleRequest(event(1200), new TestContext());
@@ -46,7 +47,7 @@ public class HandlerTest {
 
     @Test
     public void forwardsPayloadBytesUnchanged() {
-        FakeKinesis kinesis = new FakeKinesis(Set.of(), Set.of());
+        FakeKinesis kinesis = new FakeKinesis(Set.of(), Set.of(), THROTTLED);
         KinesisEvent event = event(1);
         byte[] notUtf8 = {(byte) 0xC3, (byte) 0x28, (byte) 0xFF};
         event.getRecords().get(0).getKinesis().setData(ByteBuffer.wrap(notUtf8));
@@ -58,7 +59,7 @@ public class HandlerTest {
 
     @Test
     public void retriesOnlyFailedEntries() {
-        FakeKinesis kinesis = new FakeKinesis(Set.of(), Set.of("pk-1", "pk-3"));
+        FakeKinesis kinesis = new FakeKinesis(Set.of(), Set.of("pk-1", "pk-3"), THROTTLED);
 
         StreamsEventResponse response = handler(kinesis, new FakeSns()).handleRequest(event(5), new TestContext());
 
@@ -69,7 +70,7 @@ public class HandlerTest {
 
     @Test
     public void reportsFirstPersistentlyFailedRecord() {
-        FakeKinesis kinesis = new FakeKinesis(Set.of("pk-502"), Set.of("pk-504"));
+        FakeKinesis kinesis = new FakeKinesis(Set.of("pk-502"), Set.of("pk-504"), "InternalFailure");
         FakeSns sns = new FakeSns();
 
         StreamsEventResponse response = handler(kinesis, sns).handleRequest(event(505), new TestContext());
@@ -79,6 +80,20 @@ public class HandlerTest {
                 .extracting(StreamsEventResponse.BatchItemFailure::getItemIdentifier)
                 .containsExactly("seq-502");
         assertThat(sns.published).hasSize(1);
+    }
+
+    @Test
+    public void reportsThrottledRecordWithoutNotifying() {
+        FakeKinesis kinesis = new FakeKinesis(Set.of("pk-2"), Set.of(), THROTTLED);
+        FakeSns sns = new FakeSns();
+
+        StreamsEventResponse response = handler(kinesis, sns).handleRequest(event(5), new TestContext());
+
+        assertThat(kinesis.requests).extracting(r -> r.records().size()).containsExactly(5, 1, 1);
+        assertThat(response.getBatchItemFailures())
+                .extracting(StreamsEventResponse.BatchItemFailure::getItemIdentifier)
+                .containsExactly("seq-2");
+        assertThat(sns.published).isEmpty();
     }
 
     private static Handler handler(FakeKinesis kinesis, FakeSns sns) {
@@ -121,11 +136,13 @@ public class HandlerTest {
         final List<PutRecordsRequest> requests = new ArrayList<>();
         private final Set<String> alwaysFail;
         private final Set<String> failOnce;
+        private final String errorCode;
         private final Set<String> failedOnce = new HashSet<>();
 
-        FakeKinesis(Set<String> alwaysFail, Set<String> failOnce) {
+        FakeKinesis(Set<String> alwaysFail, Set<String> failOnce, String errorCode) {
             this.alwaysFail = alwaysFail;
             this.failOnce = failOnce;
+            this.errorCode = errorCode;
         }
 
         @Override
@@ -137,8 +154,8 @@ public class HandlerTest {
                 String key = entry.partitionKey();
                 if (alwaysFail.contains(key) || (failOnce.contains(key) && failedOnce.add(key))) {
                     results.add(PutRecordsResultEntry.builder()
-                            .errorCode("ProvisionedThroughputExceededException")
-                            .errorMessage("Rate exceeded")
+                            .errorCode(errorCode)
+                            .errorMessage("Rejected by fake")
                             .build());
                     failed++;
                 } else {

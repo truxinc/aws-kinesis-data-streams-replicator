@@ -15,6 +15,7 @@ import software.amazon.awssdk.services.cloudwatch.model.Dimension;
 import software.amazon.awssdk.services.cloudwatch.model.MetricDatum;
 import software.amazon.awssdk.services.cloudwatch.model.PutMetricDataRequest;
 import software.amazon.awssdk.services.kinesis.KinesisClient;
+import software.amazon.awssdk.services.kinesis.model.ProvisionedThroughputExceededException;
 import software.amazon.awssdk.services.kinesis.model.PutRecordsRequest;
 import software.amazon.awssdk.services.kinesis.model.PutRecordsRequestEntry;
 import software.amazon.awssdk.services.kinesis.model.PutRecordsResultEntry;
@@ -35,6 +36,7 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
     private static final int MAX_BYTES_PER_PUT = 5 * 1024 * 1024;
     private static final int MAX_PUT_ATTEMPTS = 3;
     private static final long RETRY_BACKOFF_MILLIS = 100;
+    private static final String THROTTLED_ERROR_CODE = "ProvisionedThroughputExceededException";
 
     private final KinesisClient kinesisForwarder;
     private final CloudWatchClient cw;
@@ -71,11 +73,13 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
 
         int successful = 0;
         String failedSequenceNumber = null;
+        boolean throttled = false;
         for (List<KinesisEvent.KinesisEventRecord> chunk : chunk(records)) {
-            int sent = putChunkReturningSentCount(streamName, chunk);
-            successful += sent;
-            if (sent < chunk.size()) {
-                failedSequenceNumber = chunk.get(sent).getKinesis().getSequenceNumber();
+            ChunkResult result = putChunk(streamName, chunk);
+            successful += result.sent();
+            if (result.sent() < chunk.size()) {
+                failedSequenceNumber = chunk.get(result.sent()).getKinesis().getSequenceNumber();
+                throttled = result.throttled();
                 break;
             }
         }
@@ -90,7 +94,10 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
         if (failedSequenceNumber == null) {
             return StreamsEventResponse.builder().withBatchItemFailures(new ArrayList<>()).build();
         }
-        notifyFailure(streamName, failedSequenceNumber);
+        // throttling clears on retry; sustained throttling surfaces through the IteratorAge alarm instead
+        if (!throttled) {
+            notifyFailure(streamName, failedSequenceNumber);
+        }
         List<StreamsEventResponse.BatchItemFailure> failures = new ArrayList<>();
         failures.add(StreamsEventResponse.BatchItemFailure.builder().withItemIdentifier(failedSequenceNumber).build());
         return StreamsEventResponse.builder().withBatchItemFailures(failures).build();
@@ -115,7 +122,10 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
         return chunks;
     }
 
-    private int putChunkReturningSentCount(String streamName, List<KinesisEvent.KinesisEventRecord> chunk) {
+    private record ChunkResult(int sent, boolean throttled) {
+    }
+
+    private ChunkResult putChunk(String streamName, List<KinesisEvent.KinesisEventRecord> chunk) {
         List<PutRecordsRequestEntry> entries = new ArrayList<>(chunk.size());
         List<Integer> pending = new ArrayList<>(chunk.size());
         for (int i = 0; i < chunk.size(); i++) {
@@ -139,33 +149,35 @@ public class Handler implements RequestHandler<KinesisEvent, StreamsEventRespons
                         .build()).records();
             } catch (SdkException e) {
                 logger.error("PutRecords to {} failed", streamName, e);
-                return pending.get(0);
+                return new ChunkResult(pending.get(0), e instanceof ProvisionedThroughputExceededException);
             }
 
             List<Integer> stillFailed = new ArrayList<>();
             PutRecordsResultEntry firstError = null;
+            boolean throttled = true;
             for (int j = 0; j < results.size(); j++) {
                 if (results.get(j).errorCode() != null) {
                     stillFailed.add(pending.get(j));
+                    throttled &= THROTTLED_ERROR_CODE.equals(results.get(j).errorCode());
                     if (firstError == null) {
                         firstError = results.get(j);
                     }
                 }
             }
             if (stillFailed.isEmpty()) {
-                return chunk.size();
+                return new ChunkResult(chunk.size(), false);
             }
             if (attempt == MAX_PUT_ATTEMPTS) {
                 logger.error("{} of {} records to {} still failing after {} attempts: {} {}", stillFailed.size(),
                         chunk.size(), streamName, attempt, firstError.errorCode(), firstError.errorMessage());
-                return stillFailed.get(0);
+                return new ChunkResult(stillFailed.get(0), throttled);
             }
             pending = stillFailed;
             try {
                 Thread.sleep(RETRY_BACKOFF_MILLIS * attempt);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return pending.get(0);
+                return new ChunkResult(pending.get(0), throttled);
             }
         }
     }

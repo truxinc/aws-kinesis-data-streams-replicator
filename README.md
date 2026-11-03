@@ -26,7 +26,9 @@ For each invocation the handler (`KinesisReplicatorFunction/src/main/java/consum
 3. retries only the entries a call rejected (usually `ProvisionedThroughputExceededException`), up to three
    attempts with a short backoff;
 4. if entries still fail, returns the first failed record's sequence number as the batch item failure, so
-   Lambda resumes from that record, and publishes a notification to `SNSTopic`;
+   Lambda resumes from that record. It publishes a notification to `SNSTopic` only when a failure is not
+   throttling: throttled writes are retried by Lambda on the next invocation, and throttling that keeps
+   replication behind is reported by the `<stream>-replication-lag` alarm instead;
 5. publishes `ThroughPut` and `ReplicationLagSeconds` to the `KinesisCrossRegionReplication` namespace in
    the target region, and logs one summary line per batch.
 
