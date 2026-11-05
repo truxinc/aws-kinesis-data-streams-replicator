@@ -6,23 +6,10 @@ version = 0.1
 stack_name = "qaAssignmenteventKinesisStack"
 resolve_s3 = true
 s3_prefix = "qaAssignmenteventKinesisStack"
-region = "us-east-1"
+region = "us-east-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "InputStreamName=\"qa_assignmentevent_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitor-issues\""
-image_repositories = []
-disable_rollback = false
-
-[qa_locationradius_stream]
-[qa_locationradius_stream.deploy]
-[qa_locationradius_stream.deploy.parameters]
-stack_name = "qalocationradiusKinesisStack"
-resolve_s3 = true
-s3_prefix = "qalocationradiusKinesisStack"
-region = "us-east-1"
-confirm_changeset = true
-capabilities = "CAPABILITY_IAM"
-parameter_overrides = "InputStreamName=\"qa_locationradius_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitor-issues\""
+parameter_overrides = "InputStreamName=\"qa_assignmentevent_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitor-issues-qa-test\""
 image_repositories = []
 disable_rollback = false
 
@@ -48,32 +35,19 @@ s3_prefix = "prodlocationradiusKinesisStack"
 region = "us-east-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "InputStreamName=\"prod_locationradius_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitorCriticalIssues\""
+parameter_overrides = "InputStreamName=\"prod_locationradius_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitorCriticalIssues\" FunctionMemorySize=\"1024\" EventSourceBatchSize=\"10000\""
 image_repositories = []
 disable_rollback = false
 
-[uat2_assignmentevent_stream]
-[uat2_assignmentevent_stream.deploy]
-[uat2_assignmentevent_stream.deploy.parameters]
-stack_name = "uat2AssignmenteventKinesisStack"
+[prod_asyncintegrationdata_stream]
+[prod_asyncintegrationdata_stream.deploy]
+[prod_asyncintegrationdata_stream.deploy.parameters]
+stack_name = "prodAsyncintegrationdataKinesisStack"
 resolve_s3 = true
-s3_prefix = "uat2AssignmenteventKinesisStack"
-region = "us-west-1"
+s3_prefix = "prodAsyncintegrationdataKinesisStack"
+region = "us-east-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "InputStreamName=\"uat2_assignmentevent_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitor-issues\""
-image_repositories = []
-disable_rollback = false
-
-[uat2_locationradius_stream]
-[uat2_locationradius_stream.deploy]
-[uat2_locationradius_stream.deploy.parameters]
-stack_name = "uat2locationradiusKinesisStack"
-resolve_s3 = true
-s3_prefix = "uat2locationradiusKinesisStack"
-region = "us-west-1"
-confirm_changeset = true
-capabilities = "CAPABILITY_IAM"
-parameter_overrides = "InputStreamName=\"uat2_locationradius_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitor-issues\""
+parameter_overrides = "InputStreamName=\"prod_asyncintegrationdata_stream\" TargetStreamReplicationRegion=\"us-west-2\" SNSTopic=\"monitorCriticalIssues\""
 image_repositories = []
 disable_rollback = false

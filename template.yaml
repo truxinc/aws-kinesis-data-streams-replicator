@@ -25,6 +25,14 @@ Parameters:
     Type: String
     Default: SNS Topic Name
     Description: Enter SNS Topic to send failed records notification
+  FunctionMemorySize:
+    Type: Number
+    Default: 512
+    Description: Replicator Lambda memory in MB
+  EventSourceBatchSize:
+    Type: Number
+    Default: 8000
+    Description: Maximum records per replicator invocation
 
 Globals:
   Function:
@@ -53,7 +61,7 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - kinesis:PutRecord
+                  - kinesis:PutRecords
                 Resource:
                   - !Sub 'arn:aws:kinesis:*:${AWS::AccountId}:stream/${InputStreamName}'
         - PolicyName: CloudWatchMetrics
@@ -71,7 +79,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - sns:Publish
-                Resource: "*"
+                Resource: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopic}'
   KinesisReplicatorFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -80,8 +88,8 @@ Resources:
       Handler: consumer.Handler::handleRequest
       PackageType: Zip
       Role: !GetAtt LambdaRole.Arn
-      Runtime: java11
-      MemorySize: 512
+      Runtime: java25
+      MemorySize: !Ref FunctionMemorySize
       Timeout: 900
       Environment:
         Variables:
@@ -90,7 +98,7 @@ Resources:
   KinesislambdaEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
     Properties:
-      BatchSize: 8000
+      BatchSize: !Ref EventSourceBatchSize
       BisectBatchOnFunctionError: false
       Enabled: true
       EventSourceArn: !GetAtt KinesisStreamConsumer.ConsumerARN
@@ -103,6 +111,27 @@ Resources:
     Properties:
       StreamARN: !Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/${InputStreamName}'
       ConsumerName: !Sub '${InputStreamName}_replicator'
+
+  ReplicationLagAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${InputStreamName}-replication-lag'
+      AlarmDescription: !Sub 'Replication of ${InputStreamName} to ${TargetStreamReplicationRegion} is over an hour behind; records expire unreplicated once lag reaches the stream retention.'
+      Namespace: AWS/Lambda
+      MetricName: IteratorAge
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref KinesisReplicatorFunction
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 3600000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopic}'
+      OKActions:
+        - !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSTopic}'
 
 Outputs:
   FunctionName:

@@ -1,4 +1,4 @@
-<Configuration status="WARN" packages="com.amazonaws.services.lambda.runtime.log4j2">
+<Configuration status="WARN">
     <Appenders>
         <Lambda name="Lambda">
             <PatternLayout>
@@ -11,6 +11,5 @@
             <AppenderRef ref="Lambda"/>
         </Root>
         <Logger name="software.amazon.awssdk" level="WARN" />
-        <Logger name="software.amazon.awssdk.request" level="DEBUG" />
     </Loggers>
 </Configuration>
